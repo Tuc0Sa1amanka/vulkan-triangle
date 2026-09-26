@@ -1,0 +1,10 @@
+build/
+.cache/
+compile_commands.json
+*.spv
+*.o
+*.a
+screenshot.ppm
+screenshot.png
+.vscode/
+.idea/
