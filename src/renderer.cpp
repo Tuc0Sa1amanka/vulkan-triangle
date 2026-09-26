@@ -1,10 +1,12 @@
 #include "renderer.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <string_view>
 
 namespace tri {
 
@@ -97,6 +99,22 @@ void Renderer::glfwErrorCallback(int code, const char *desc) {
 void Renderer::createWindow() {
     glfwSetErrorCallback(&glfwErrorCallback);
 
+    // GLFW 3.4 can use either X11 or Wayland and picks Wayland whenever
+    // WAYLAND_DISPLAY is set. Some builds ignore the GLFW_PLATFORM variable,
+    // so the same choice is passed explicitly as an init hint. Forcing X11
+    // under WSLg is useful because XWayland windows are easier to inspect.
+    if (const char *requested = std::getenv("GLFW_PLATFORM")) {
+        const std::string_view platform(requested);
+        if (platform == "x11") {
+            glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+        } else if (platform == "wayland") {
+            glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_WAYLAND);
+        } else {
+            std::cerr << "[win] ignoring unknown GLFW_PLATFORM '" << platform
+                      << "'\n";
+        }
+    }
+
     if (glfwInit() != GLFW_TRUE) {
         throw VulkanError("glfwInit failed");
     }
@@ -117,6 +135,19 @@ void Renderer::createWindow() {
 
     glfwSetWindowUserPointer(window_, this);
     glfwSetFramebufferSizeCallback(window_, &Renderer::framebufferResizeCallback);
+
+    int framebufferWidth = 0;
+    int framebufferHeight = 0;
+    glfwGetFramebufferSize(window_, &framebufferWidth, &framebufferHeight);
+
+    const int platform = glfwGetPlatform();
+    const char *platformName = platform == GLFW_PLATFORM_WAYLAND ? "wayland"
+                               : platform == GLFW_PLATFORM_X11    ? "x11"
+                               : platform == GLFW_PLATFORM_NULL    ? "null"
+                                                                   : "unknown";
+    std::cout << "[win] platform=" << platformName << " window=" << kWidth << "x"
+              << kHeight << " framebuffer=" << framebufferWidth << "x"
+              << framebufferHeight << "\n";
 }
 
 std::vector<const char *> Renderer::requiredInstanceExtensions() const {

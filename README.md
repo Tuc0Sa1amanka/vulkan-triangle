@@ -64,6 +64,19 @@ The program renders 200 frames, prints the achieved frame rate, writes
 To exercise the resize path, resize the window while it is running, or force a
 rebuild by calling `recreateSwapchain()` from `drawFrame()`.
 
+### WSL
+
+GLFW 3.4 uses either X11 or Wayland and picks Wayland whenever `WAYLAND_DISPLAY`
+is set. Under WSLg that works, but the window can end up hard to find, so the
+backend can be chosen explicitly:
+
+```sh
+GLFW_PLATFORM=x11 ./build/vulkan_triangle --frames 0
+```
+
+Going through XWayland is also noticeably faster here — 200 fps against 58 fps
+for the Wayland path on `lavapipe` — because the presentation path is shorter.
+
 ## Output
 
 `screenshot.ppm` holds the presented frame: an index-driven triangle with
