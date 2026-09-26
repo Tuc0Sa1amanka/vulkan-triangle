@@ -54,8 +54,15 @@ sudo apt install build-essential cmake ninja-build \
 ```
 
 The program renders 200 frames, prints the achieved frame rate, writes
-`screenshot.ppm` and exits. Add a swapchain recreation at any point in
-`drawFrame()` to exercise the resize path.
+`screenshot.ppm` and exits.
+
+```sh
+./build/vulkan_triangle --frames 0   # run until the window is closed
+./build/vulkan_triangle --frames 60  # render 60 frames, then exit
+```
+
+To exercise the resize path, resize the window while it is running, or force a
+rebuild by calling `recreateSwapchain()` from `drawFrame()`.
 
 ## Output
 

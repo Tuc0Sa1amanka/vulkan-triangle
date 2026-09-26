@@ -33,7 +33,8 @@ struct Vertex {
 
 class Renderer {
 public:
-    Renderer();
+    // maxFrames == 0 keeps rendering until the window is closed.
+    explicit Renderer(uint32_t maxFrames = 200);
     ~Renderer();
 
     Renderer(const Renderer &) = delete;
@@ -45,9 +46,9 @@ private:
     static constexpr uint32_t kWidth = 800;
     static constexpr uint32_t kHeight = 600;
     static constexpr uint32_t kIndexCount = 3;
-    static constexpr uint32_t kExitAfterFrames = 200;
 
     GLFWwindow *window_ = nullptr;
+    uint32_t maxFrames_ = 200;
 
     // The raii wrappers delete their default constructor when
     // VULKAN_HPP_NO_STRUCT_CONSTRUCTORS is set, so they are copy-initialised

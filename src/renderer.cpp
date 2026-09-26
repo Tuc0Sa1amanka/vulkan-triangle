@@ -56,7 +56,7 @@ Vertex::attributeDescriptions() {
     };
 }
 
-Renderer::Renderer() {
+Renderer::Renderer(uint32_t maxFrames) : maxFrames_(maxFrames) {
     createWindow();
     createInstance();
     setupDebugMessenger();
@@ -917,7 +917,7 @@ void Renderer::run() {
 
         drawFrame();
 
-        if (++frames >= kExitAfterFrames) {
+        if (maxFrames_ != 0 && ++frames >= maxFrames_) {
             const double elapsed = glfwGetTime() - start;
             std::cout << "[perf] " << frames << " frames in " << elapsed << "s ("
                       << static_cast<double>(frames) / elapsed << " fps)\n";
