@@ -12,6 +12,28 @@ namespace tri {
 
 namespace {
 
+// Bytes per pixel for the swapchain formats chooseSurfaceFormat can return.
+std::optional<uint32_t> bytesPerPixel(vk::Format format) {
+    switch (format) {
+    case vk::Format::eB8G8R8A8Unorm:
+    case vk::Format::eB8G8R8A8Srgb:
+    case vk::Format::eR8G8B8A8Unorm:
+    case vk::Format::eR8G8B8A8Srgb:
+        return 4;
+    case vk::Format::eA8B8G8R8UnormPack32:
+    case vk::Format::eA8B8G8R8SrgbPack32:
+        return 4;
+    case vk::Format::eA2R10G10B10UnormPack32:
+    case vk::Format::eA2B10G10R10UnormPack32:
+    case vk::Format::eR16G16B16A16Sfloat:
+    case vk::Format::eR16G16B16A16Unorm:
+    case vk::Format::eR32G32B32A32Sfloat:
+        return 8;
+    default:
+        return std::nullopt;
+    }
+}
+
 std::vector<char> readFile(const std::string &path) {
     std::ifstream file(path, std::ios::ate | std::ios::binary);
     if (!file) {
@@ -150,12 +172,34 @@ void Renderer::createWindow() {
               << framebufferHeight << "\n";
 }
 
-std::vector<const char *> Renderer::requiredInstanceExtensions() const {
+std::vector<const char *> Renderer::requiredInstanceExtensions() {
     uint32_t count = 0;
     const char **raw = glfwGetRequiredInstanceExtensions(&count);
+    if (raw == nullptr) {
+        throw VulkanError(
+            "GLFW required no instance extensions; is Vulkan support compiled "
+            "into this GLFW build?");
+    }
 
     std::vector<const char *> result(raw, raw + count);
-    result.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+    // The messenger is optional: without the extension the program still runs,
+    // it just gets no validation output.
+    bool debugUtils = false;
+    for (const auto &ext : context_.enumerateInstanceExtensionProperties()) {
+        if (std::strcmp(ext.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) ==
+            0) {
+            debugUtils = true;
+            break;
+        }
+    }
+    if (debugUtils) {
+        result.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        debugUtilsAvailable_ = true;
+    } else {
+        std::cerr << "[vulkan] " << VK_EXT_DEBUG_UTILS_EXTENSION_NAME
+                  << " unavailable, validation messages disabled\n";
+    }
     return result;
 }
 
@@ -171,7 +215,9 @@ void Renderer::createInstance() {
     const auto extensions = requiredInstanceExtensions();
 
     // Chaining the messenger into pNext catches messages during instance
-    // creation, which a standalone messenger would miss.
+    // creation, which a standalone messenger would miss. It is only legal
+    // while VK_EXT_debug_utils is being enabled, so it stays out of pNext
+    // otherwise.
     const vk::DebugUtilsMessengerCreateInfoEXT debugInfo{
         .messageSeverity = vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose,
         .messageType = vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral |
@@ -181,7 +227,7 @@ void Renderer::createInstance() {
     };
 
     const vk::InstanceCreateInfo createInfo{
-        .pNext = &debugInfo,
+        .pNext = debugUtilsAvailable_ ? &debugInfo : nullptr,
         .pApplicationInfo = &appInfo,
         .enabledExtensionCount = static_cast<uint32_t>(extensions.size()),
         .ppEnabledExtensionNames = extensions.data(),
@@ -191,6 +237,10 @@ void Renderer::createInstance() {
 }
 
 void Renderer::setupDebugMessenger() {
+    if (!debugUtilsAvailable_) {
+        return;
+    }
+
     const vk::DebugUtilsMessengerCreateInfoEXT info{
         .messageSeverity = vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose,
         .messageType = vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral |
@@ -318,11 +368,33 @@ void Renderer::createLogicalDevice() {
 
 vk::SurfaceFormatKHR Renderer::chooseSurfaceFormat(
     const std::vector<vk::SurfaceFormatKHR> &formats) const {
+    // saveScreenshot writes 8-bit PPM, so an 8-bit-per-channel format is
+    // strongly preferred over e.g. a float or 10-bit one. Anything wider is
+    // still accepted for rendering; only the screenshot is refused.
+    const auto usable = [](const vk::SurfaceFormatKHR &f) {
+        const auto bpp = bytesPerPixel(f.format);
+        return bpp.has_value() && *bpp == 4;
+    };
+
     for (const auto &format : formats) {
         if (format.format == vk::Format::eB8G8R8A8Srgb &&
             format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear) {
             return format;
         }
+    }
+    for (const auto &format : formats) {
+        if (format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear &&
+            usable(format)) {
+            return format;
+        }
+    }
+    for (const auto &format : formats) {
+        if (usable(format)) {
+            return format;
+        }
+    }
+    if (formats.empty()) {
+        throw VulkanError("surface reports no formats");
     }
     return formats.front();
 }
@@ -668,10 +740,11 @@ void Renderer::createSyncObjects() {
     imageAvailable_ = vk::raii::Semaphore(device_, semInfo);
     renderFinished_ = vk::raii::Semaphore(device_, semInfo);
 
-    fenceCreateInfo_ = vk::FenceCreateInfo{
-        .flags = vk::FenceCreateFlagBits::eSignaled,
-    };
-    inFlight_ = vk::raii::Fence(device_, fenceCreateInfo_);
+    // Signalled, so the first frame does not wait on a fence that was never
+    // submitted to.
+    inFlight_ = vk::raii::Fence(device_, vk::FenceCreateInfo{
+                                          .flags = vk::FenceCreateFlagBits::eSignaled,
+                                      });
 }
 
 void Renderer::recordCommandBuffer(uint32_t imageIndex) {
@@ -746,7 +819,20 @@ void Renderer::saveScreenshot(const std::string &path) {
         throw VulkanError("nothing rendered yet");
     }
 
-    const vk::DeviceSize bufferSize = extent_.width * extent_.height * 4;
+    // Derive the row pitch from the format instead of assuming 4 bytes per
+    // pixel: a surface that only offers a wider format would otherwise size
+    // the readback buffer too small and overrun it while writing the PPM.
+    // Only 8-bit channels can be handed to PPM without a colour conversion,
+    // so anything wider is refused rather than silently mis-decoded.
+    const auto bpp = bytesPerPixel(surfaceFormat_.format);
+    if (!bpp.has_value() || *bpp != 4) {
+        throw VulkanError(
+            "screenshot needs an 8-bit-per-channel swapchain format, got " +
+            std::string(vk::to_string(surfaceFormat_.format)));
+    }
+
+    const vk::DeviceSize bufferSize =
+        static_cast<vk::DeviceSize>(extent_.width) * extent_.height * *bpp;
 
     vk::raii::DeviceMemory readbackMemory = nullptr;
     auto readback = createBuffer(bufferSize,
@@ -755,7 +841,11 @@ void Renderer::saveScreenshot(const std::string &path) {
                                      vk::MemoryPropertyFlagBits::eHostCoherent,
                                  readbackMemory);
 
-    const vk::Image image = swapchainImages_[0];
+    // The image written by the most recent drawFrame, not necessarily [0] —
+    // the swapchain rotates its images, and with eUndefined transitions the
+    // other ones hold stale or undefined contents.
+    const uint32_t imageIndex = lastImageIndex_ % swapchainImages_.size();
+    const vk::Image image = swapchainImages_[imageIndex];
 
     auto cmd = device_.allocateCommandBuffers(
         vk::CommandBufferAllocateInfo{
@@ -835,7 +925,9 @@ void Renderer::saveScreenshot(const std::string &path) {
     // PPM wants 8-bit RGB; the swapchain format is BGRA on virtually every
     // desktop implementation.
     const bool bgra = surfaceFormat_.format == vk::Format::eB8G8R8A8Srgb ||
-                      surfaceFormat_.format == vk::Format::eB8G8R8A8Unorm;
+                      surfaceFormat_.format == vk::Format::eB8G8R8A8Unorm ||
+                      surfaceFormat_.format == vk::Format::eA8B8G8R8SrgbPack32 ||
+                      surfaceFormat_.format == vk::Format::eA8B8G8R8UnormPack32;
 
     std::ofstream out(path, std::ios::binary);
     if (!out) {
@@ -846,7 +938,8 @@ void Renderer::saveScreenshot(const std::string &path) {
     const auto *pixels = static_cast<const uint8_t *>(mapped);
     for (uint32_t y = 0; y < extent_.height; ++y) {
         for (uint32_t x = 0; x < extent_.width; ++x) {
-            const size_t i = (static_cast<size_t>(y) * extent_.width + x) * 4;
+            const size_t i =
+                (static_cast<size_t>(y) * extent_.width + x) * *bpp;
             const uint8_t r = bgra ? pixels[i + 2] : pixels[i + 0];
             const uint8_t g = pixels[i + 1];
             const uint8_t b = bgra ? pixels[i + 0] : pixels[i + 2];
@@ -877,12 +970,13 @@ void Renderer::drawFrame() {
         throw VulkanError("waitForFences failed");
     }
 
-    // Reset the fence for the next frame by replacing it with a freshly
-    // signalled one. The raii wrapper has no reset(), and plain assignment to
-    // nullptr would hand a null handle to vkQueueSubmit.
-    inFlight_ = vk::raii::Fence(device_, fenceCreateInfo_);
+    // Reset the fence for the next frame. vk::raii::Fence has no reset(), and
+    // vk::raii::Device::resetFences returns void — it reports failure by
+    // throwing, so there is no result to compare here.
+    device_.resetFences(*inFlight_);
 
     recordCommandBuffer(imageIndex);
+    lastImageIndex_ = imageIndex;
 
     const vk::PipelineStageFlags waitStage =
         vk::PipelineStageFlagBits::eColorAttachmentOutput;
@@ -925,6 +1019,9 @@ void Renderer::recreateSwapchain() {
     createPipelines();
     createCommandBuffers();
 
+    // The new swapchain may have a different image count, and none of its
+    // images has been rendered into yet.
+    lastImageIndex_ = 0;
     framebufferResized_ = false;
 }
 

@@ -56,6 +56,7 @@ private:
     vk::raii::Context context_;
     vk::raii::Instance instance_ = nullptr;
     vk::raii::DebugUtilsMessengerEXT debugMessenger_ = nullptr;
+    bool debugUtilsAvailable_ = false;
     vk::raii::SurfaceKHR surface_ = nullptr;
     vk::raii::PhysicalDevice physicalDevice_ = nullptr;
     vk::raii::Device device_ = nullptr;
@@ -88,9 +89,9 @@ private:
     vk::raii::Semaphore imageAvailable_ = nullptr;
     vk::raii::Semaphore renderFinished_ = nullptr;
     vk::raii::Fence inFlight_ = nullptr;
-    vk::FenceCreateInfo fenceCreateInfo_;
 
     bool framebufferResized_ = false;
+    uint32_t lastImageIndex_ = 0;
 
     void createWindow();
     void createInstance();
@@ -126,7 +127,7 @@ private:
     bool deviceSuitable(const vk::raii::PhysicalDevice &dev) const;
     std::optional<uint32_t>
     findGraphicsQueue(const vk::raii::PhysicalDevice &dev) const;
-    std::vector<const char *> requiredInstanceExtensions() const;
+    std::vector<const char *> requiredInstanceExtensions();
     std::vector<const char *> requiredDeviceExtensions() const;
     vk::SurfaceFormatKHR chooseSurfaceFormat(
         const std::vector<vk::SurfaceFormatKHR> &formats) const;

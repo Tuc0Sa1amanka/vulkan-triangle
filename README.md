@@ -74,13 +74,26 @@ backend can be chosen explicitly:
 GLFW_PLATFORM=x11 ./build/vulkan_triangle --frames 0
 ```
 
-Going through XWayland is also noticeably faster here — 200 fps against 58 fps
-for the Wayland path on `lavapipe` — because the presentation path is shorter.
+Going through XWayland is also noticeably faster here — around 290 fps against
+110 fps for the Wayland path on `llvmpipe` — because the presentation path is
+shorter. The two backends also disagree on resolution: WSLg hands the Wayland
+surface a scale factor of 2, so its swapchain comes out as 1600x1200 while the
+window itself is 800x600. `chooseExtent()` takes `currentExtent` from the
+surface capabilities whenever the compositor reports one, so the triangle is
+rendered at the surface's native size rather than the window's.
 
 ## Output
 
 `screenshot.ppm` holds the presented frame: an index-driven triangle with
-per-vertex colour, red/green/blue at the corners, on a dark background.
+per-vertex colour, red/green/blue at the corners, on a dark background. The
+background reads as `(39, 39, 69)` in the file even though the clear value is
+`(0.02, 0.02, 0.06)`: the swapchain format is `B8G8R8A8Srgb`, so the driver
+encodes the linear clear colour into sRGB on write.
+
+The screenshot only covers the 8-bit-per-channel formats, since a PPM cannot
+hold float or 10-bit channels without a colour conversion. `chooseSurfaceFormat()`
+prefers one of those and `saveScreenshot()` refuses with a diagnostic rather
+than mis-decoding a wider format.
 
 ![Triangle rendered by the program](docs/screenshot.png)
 
