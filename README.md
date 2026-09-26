@@ -62,6 +62,8 @@ The program renders 200 frames, prints the achieved frame rate, writes
 `screenshot.ppm` holds the presented frame: an index-driven triangle with
 per-vertex colour, red/green/blue at the corners, on a dark background.
 
+![Triangle rendered by the program](docs/screenshot.png)
+
 ## Layout
 
 ```

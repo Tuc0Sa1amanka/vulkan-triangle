@@ -4,7 +4,7 @@ compile_commands.json
 *.spv
 *.o
 *.a
-screenshot.ppm
-screenshot.png
+/screenshot.ppm
+/screenshot.png
 .vscode/
 .idea/
