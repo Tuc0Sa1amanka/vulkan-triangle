@@ -81,6 +81,11 @@ Renderer::~Renderer() {
     }
 
     destroySwapchain();
+
+    // The VkSurfaceKHR must go away while the GLFW window is still alive,
+    // otherwise the driver tears down its window handles first.
+    surface_ = nullptr;
+
     glfwDestroyWindow(window_);
     glfwTerminate();
 }
@@ -632,10 +637,10 @@ void Renderer::createSyncObjects() {
     imageAvailable_ = vk::raii::Semaphore(device_, semInfo);
     renderFinished_ = vk::raii::Semaphore(device_, semInfo);
 
-    const vk::FenceCreateInfo fenceInfo{
+    fenceCreateInfo_ = vk::FenceCreateInfo{
         .flags = vk::FenceCreateFlagBits::eSignaled,
     };
-    inFlight_ = vk::raii::Fence(device_, fenceInfo);
+    inFlight_ = vk::raii::Fence(device_, fenceCreateInfo_);
 }
 
 void Renderer::recordCommandBuffer(uint32_t imageIndex) {
@@ -705,6 +710,124 @@ void Renderer::recordCommandBuffer(uint32_t imageIndex) {
     commandBuffers_[0].end();
 }
 
+void Renderer::saveScreenshot(const std::string &path) {
+    if (swapchainImages_.empty() || extent_.width == 0 || extent_.height == 0) {
+        throw VulkanError("nothing rendered yet");
+    }
+
+    const vk::DeviceSize bufferSize = extent_.width * extent_.height * 4;
+
+    vk::raii::DeviceMemory readbackMemory = nullptr;
+    auto readback = createBuffer(bufferSize,
+                                 vk::BufferUsageFlagBits::eTransferDst,
+                                 vk::MemoryPropertyFlagBits::eHostVisible |
+                                     vk::MemoryPropertyFlagBits::eHostCoherent,
+                                 readbackMemory);
+
+    const vk::Image image = swapchainImages_[0];
+
+    auto cmd = device_.allocateCommandBuffers(
+        vk::CommandBufferAllocateInfo{
+            .commandPool = *commandPool_,
+            .level = vk::CommandBufferLevel::ePrimary,
+            .commandBufferCount = 1,
+        });
+
+    // eColorAttachmentOptimal -> eTransferSrcOptimal
+    const vk::ImageMemoryBarrier2 toTransfer{
+        .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+        .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+        .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
+        .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+        .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
+        .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
+        .image = image,
+        .subresourceRange = vk::ImageSubresourceRange{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .levelCount = 1,
+            .layerCount = 1,
+        },
+    };
+    // eTransferSrcOptimal -> eColorAttachmentOptimal, so the next frame can
+    // keep using the image.
+    const vk::ImageMemoryBarrier2 back{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+        .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+        .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+        .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
+        .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+        .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
+        .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
+        .image = image,
+        .subresourceRange = vk::ImageSubresourceRange{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .levelCount = 1,
+            .layerCount = 1,
+        },
+    };
+
+    cmd[0].begin({});
+    cmd[0].pipelineBarrier2(vk::DependencyInfo{
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &toTransfer,
+    });
+    const vk::BufferImageCopy region{
+        .bufferOffset = 0,
+        .imageSubresource = vk::ImageSubresourceLayers{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .imageOffset = {0, 0, 0},
+        .imageExtent = vk::Extent3D{extent_.width, extent_.height, 1},
+    };
+    cmd[0].copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal,
+                             *readback, region);
+    cmd[0].pipelineBarrier2(vk::DependencyInfo{
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &back,
+    });
+    cmd[0].end();
+
+    graphicsQueue_.submit(vk::SubmitInfo{
+        .commandBufferCount = 1,
+        .pCommandBuffers = &*cmd[0],
+    });
+    graphicsQueue_.waitIdle();
+
+    void *mapped = readbackMemory.mapMemory(0, bufferSize);
+
+    // PPM wants 8-bit RGB; the swapchain format is BGRA on virtually every
+    // desktop implementation.
+    const bool bgra = surfaceFormat_.format == vk::Format::eB8G8R8A8Srgb ||
+                      surfaceFormat_.format == vk::Format::eB8G8R8A8Unorm;
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        throw VulkanError("cannot write " + path);
+    }
+    out << "P6\n" << extent_.width << " " << extent_.height << "\n255\n";
+
+    const auto *pixels = static_cast<const uint8_t *>(mapped);
+    for (uint32_t y = 0; y < extent_.height; ++y) {
+        for (uint32_t x = 0; x < extent_.width; ++x) {
+            const size_t i = (static_cast<size_t>(y) * extent_.width + x) * 4;
+            const uint8_t r = bgra ? pixels[i + 2] : pixels[i + 0];
+            const uint8_t g = pixels[i + 1];
+            const uint8_t b = bgra ? pixels[i + 0] : pixels[i + 2];
+            out.put(static_cast<char>(r));
+            out.put(static_cast<char>(g));
+            out.put(static_cast<char>(b));
+        }
+    }
+
+    readbackMemory.unmapMemory();
+}
+
 void Renderer::drawFrame() {
     const auto [acquireResult, imageIndex] =
         swapchain_.acquireNextImage(UINT64_MAX, *imageAvailable_);
@@ -722,7 +845,11 @@ void Renderer::drawFrame() {
         vk::Result::eSuccess) {
         throw VulkanError("waitForFences failed");
     }
-    inFlight_ = nullptr;
+
+    // Reset the fence for the next frame by replacing it with a freshly
+    // signalled one. The raii wrapper has no reset(), and plain assignment to
+    // nullptr would hand a null handle to vkQueueSubmit.
+    inFlight_ = vk::raii::Fence(device_, fenceCreateInfo_);
 
     recordCommandBuffer(imageIndex);
 
@@ -799,6 +926,14 @@ void Renderer::run() {
     }
 
     device_.waitIdle();
+
+    try {
+        saveScreenshot("screenshot.ppm");
+        std::cout << "[shot] wrote screenshot.ppm (" << extent_.width << "x"
+                  << extent_.height << ")\n";
+    } catch (const std::exception &error) {
+        std::cerr << "[shot] " << error.what() << "\n";
+    }
 }
 
 } // namespace tri
